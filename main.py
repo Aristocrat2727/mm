@@ -1,303 +1,348 @@
 from datetime import datetime, timedelta
-from sys import argv, exit
-from telethon import TelegramClient, events, connection
-from telethon.tl.types import UserStatusRecently, UserStatusEmpty, UserStatusOnline, UserStatusOffline, PeerUser, PeerChat, PeerChannel
-from time import mktime, sleep
-import telethon.sync
-from threading import Thread
+from telethon import TelegramClient, events
+from telethon.tl.types import UserStatusOnline, UserStatusOffline, UserStatusRecently, UserStatusLastWeek, UserStatusLastMonth, UserStatusEmpty
+from time import sleep
 import collections
 import os
+import asyncio
 
 DATETIME_FORMAT = '%Y-%m-%d %H:%M:%S'
 
-# Берем переменные из окружения Railway
+# Переменные окружения
 API_HASH = os.environ.get('API_HASH')
 API_ID = int(os.environ.get('API_ID'))
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 
-# ВАЖНО: для бота используем start(bot_token=...)
-# Не нужно вызывать client.connect() и client.start() отдельно
+# Запуск бота
 bot = TelegramClient('bot', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 
 data = {}
 
-help_messages = ['/start - start online monitoring ',
-         '/stop - stop online monitoring ',
-         '/help - show help ',
-         '/add - add user to monitoring list "/add +79991234567 UserName"',
-         '/list - show added users',
-         '/clear - clear user list',
-         '/remove - remove user from list with position in list (to show use /list command)"/remove 1"',
-         '/setdelay - set delay between user check in seconds',
-         '/logs - display command log',
-         '/clearlogs - clear the command log file',
-         '/cleardata - reset configuration',
-         '/disconnect - disconnect bot',
-         '/getall - status']
+help_messages = [
+    '/start - запустить мониторинг',
+    '/stop - остановить мониторинг',
+    '/help - показать помощь',
+    '/add @username Имя - добавить пользователя',
+    '/list - показать список',
+    '/clear - очистить список',
+    '/remove 1 - удалить по номеру',
+    '/setdelay 30 - задержка в секундах',
+    '/logs - показать логи',
+    '/clearlogs - очистить логи',
+    '/status - проверить статус сейчас'
+]
 
-
-print('Bot started!')
+print('✅ Бот запущен!')
 
 class Contact:
-    online = None
-    last_offline = None
-    last_online = None
-    id = ''
-    name = ''
-
-    def __init__(self, id, name):
-        self.id = id
+    def __init__(self, user_id, name, username=''):
+        self.user_id = user_id
         self.name = name
+        self.username = username
+        self.online = False
+        self.last_change = None
+        self.last_status = None
+    
     def __str__(self):
-        return f'{self.name}: {self.id}'
+        return f'{self.name}: {self.username or self.user_id}'
 
-@bot.on(events.NewMessage(pattern='^/logs$'))
-async def logs(event):
-    try:
-        with open('spy_log.txt', 'r') as file:
-            str = file.read()
-        await event.respond(str)
-    except:
-        await event.respond('Log file is empty or not found')
+def format_time_diff(diff):
+    """Форматирует timedelta в человеческий формат"""
+    if not diff:
+        return "только что"
+    
+    total_seconds = int(diff.total_seconds())
+    
+    if total_seconds < 60:
+        return f"{total_seconds} сек"
+    elif total_seconds < 3600:
+        minutes = total_seconds // 60
+        seconds = total_seconds % 60
+        return f"{minutes} мин {seconds} сек"
+    else:
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        return f"{hours} ч {minutes} мин"
 
-@bot.on(events.NewMessage(pattern='/clearlogs$'))
-async def clearLogs(event):
-    open('spy_log.txt', 'w').close()
-    await event.respond('logs has been deleted')
+def get_status_text(status):
+    """Переводит статус в читаемый текст"""
+    if isinstance(status, UserStatusOnline):
+        return "🟢 В сети"
+    elif isinstance(status, UserStatusOffline):
+        if status.was_online:
+            diff = datetime.now().astimezone() - status.was_online
+            return f"⚫ Был(а) {format_time_diff(diff)} назад"
+        return "⚫ Не в сети"
+    elif isinstance(status, UserStatusRecently):
+        return "🟡 Был(а) недавно"
+    elif isinstance(status, UserStatusLastWeek):
+        return "🟡 Был(а) на этой неделе"
+    elif isinstance(status, UserStatusLastMonth):
+        return "🟡 Был(а) в этом месяце"
+    else:
+        return "⚪ Статус скрыт"
 
-@bot.on(events.NewMessage(pattern='^/clear$'))
-async def clear(event):
-    message = event.message
-    id = message.chat_id
-    data[id] = {}
-    await event.respond('User list has been cleared')
+@bot.on(events.NewMessage(pattern='/start'))
+async def start_cmd(event):
+    await event.respond('👋 Бот запущен!\nИспользуйте /help для списка команд')
 
-@bot.on(events.NewMessage(pattern='^/help$'))
-async def help(event):
+@bot.on(events.NewMessage(pattern='/help'))
+async def help_cmd(event):
     await event.respond('\n'.join(help_messages))
 
-@bot.on(events.NewMessage())
-async def log(event):
+@bot.on(events.NewMessage(pattern='/add'))
+async def add_user(event):
     message = event.message
-    id = message.chat_id
-    str = f'{datetime.now().strftime(DATETIME_FORMAT)}: [{id}]: {message.message}'
-    printToFile(str)
-
-@bot.on(events.NewMessage(pattern='^/stop$'))
-async def stop(event):
-    message = event.message
-    id = message.chat_id
-    if id not in data:
-        data[id] = {}
-    user_data = data[id]
-    user_data['is_running'] = False
-    await event.respond('Monitoring has been stopped')
-
-@bot.on(events.NewMessage(pattern='^/cleardata$'))
-async def clearData(event):
-    data.clear()
-    await event.respond('Data has been cleared')
-
-@bot.on(events.NewMessage(pattern='^/start$'))
-async def start(event):
-    message = event.message
-    id = message.chat_id
-    if id not in data:
-        data[id] = {}
-    user_data = data[id]
-    if('is_running' in user_data and user_data['is_running']):
-        await event.respond('Spy is already started')
+    parts = message.message.split(maxsplit=2)
+    
+    if len(parts) < 3:
+        await event.respond('❌ Использование: /add @username Имя')
         return
-
-    if 'contacts' not in user_data:
-        user_data['contacts'] = []
-
-    contacts = user_data['contacts']
-
-    if(len(contacts) < 1):
-        await event.respond('No contacts added')
-        return
-    await event.respond('Monitoring has been started')
-
-    counter = 0
-    user_data['is_running'] = True
-
-    while True:
-        user_data = data[id]
-        if(not user_data['is_running'] or len(contacts) < 1):
-            break;
-        print(f'running {id}: {counter}')
-        counter+=1
+    
+    identifier = parts[1]
+    name = parts[2]
+    chat_id = message.chat_id
+    
+    temp_client = TelegramClient(f'temp_{chat_id}', API_ID, API_HASH)
+    await temp_client.start(bot_token=BOT_TOKEN)
+    
+    try:
+        entity = await temp_client.get_entity(identifier)
         
-        # Создаем клиент для каждого пользователя отдельно
-        client = TelegramClient(f'session_{id}', API_ID, API_HASH)
-        await client.start()
+        if chat_id not in data:
+            data[chat_id] = {'contacts': [], 'is_running': False, 'delay': 30}
         
-        for contact in contacts:
-            print(contact)
-            try:
-                account = await client.get_entity(contact.id)
-
-                if isinstance(account.status, UserStatusOnline):
-                    if contact.online != True:
-                        contact.online = True
-                        contact.last_offline = datetime.now()
-                        was_offline='unknown offline time'
-                        if contact.last_online is not None:
-                            diff = contact.last_offline - contact.last_online
-                            was_offline = get_interval(diff)
-                        await event.respond(f'{was_offline}: {contact.name} went online.')
-                elif isinstance(account.status, UserStatusOffline):
-                    if contact.online == True:
-                        contact.online = False
-                        contact.last_online = account.status.was_online
-
-                        was_online='unknown online time'
-                        if contact.last_offline is not None:
-                            diff = contact.last_online - contact.last_offline
-                            was_online = get_interval(diff)
-
-                        await event.respond(f'{was_online} {contact.name} went offline.')
-                    contact.last_offline = None
-                else:
-                    if contact.online == True:
-                        contact.online = False
-                        contact.last_online = datetime.now()
-
-                        was_online='unknown online time'
-                        if contact.last_offline is not None:
-                            diff = contact.last_online - contact.last_offline
-                            was_online = get_interval(diff)
-
-                        await event.respond(f'{was_online}: {contact.name} went offline.')
-                        contact.last_offline = None
-            except Exception as e:
-                print(f"Error checking {contact.name}: {e}")
+        if 'contacts' not in data[chat_id]:
+            data[chat_id]['contacts'] = []
         
-        await client.disconnect()
+        contact = Contact(entity.id, name, identifier)
+        data[chat_id]['contacts'].append(contact)
         
-        delay = 5
-        if('delay' in user_data):
-            delay = user_data['delay']
-        sleep(delay)
-    user_data['is_running'] = False
-    await event.respond(f'Spy gonna zzzzzz...')
-
-@bot.on(events.NewMessage(pattern='^/add'))
-async def add(event):
-    message = event.message
-    person_info = message.message.split()
-    print(person_info)
-    phone = person_info[1]
-    name = person_info[2]
-    id = message.chat_id
-    if id not in data:
-        data[id] = {}
-    user_data = data[id]
-
-    if 'contacts' not in user_data:
-        user_data['contacts'] = []
-    contacts = user_data['contacts']
-    contact = Contact(phone, name)
-    contacts.append(contact)
-    await event.respond(f'{name}: {phone} has been added')
-
-
-@bot.on(events.NewMessage(pattern='^/remove'))
-async def remove(event):
-    message = event.message
-    person_info = message.message.split()
-    print(person_info)
-    index = int(person_info[1])
-    id = message.chat_id
-    if id not in data:
-        data[id] = {}
-    user_data = data[id]
-
-    if 'contacts' not in user_data:
-        user_data['contacts'] = []
-    contacts = user_data['contacts']
-
-    if(len(contacts) > index):
-        del contacts[index]
-        await event.respond(f'User №{index} has been deleted')
-    else:
-        await event.respond('Incorrect index')
-
-@bot.on(events.NewMessage(pattern='^/setdelay'))
-async def setDelay(event):
-    message = event.message
-    person_info = message.message.split()
-    print(person_info)
-    index = int(person_info[1])
-    id = message.chat_id
-    if id not in data:
-        data[id] = {}
-    user_data = data[id]
-
-    print(index)
-    if(index >= 0):
-        user_data['delay'] = index
-        await event.respond(f'Delay has been updated to {index}')
-    else:
-        await event.respond('Incorrect delay')
-
-@bot.on(events.NewMessage(pattern='^/disconnect$'))
-async def disconnect(event):
-    await event.respond('Bot gonna disconnect')
-    await bot.disconnect()
+        status_text = get_status_text(entity.status)
+        await event.respond(f'✅ Добавлен: {name}\n📊 Текущий статус: {status_text}')
+        
+    except Exception as e:
+        await event.respond(f'❌ Ошибка: {str(e)[:200]}\n\nПопробуйте:\n1. @username\n2. Числовой ID\n3. Убедитесь что пользователь писал боту')
+    finally:
+        await temp_client.disconnect()
 
 @bot.on(events.NewMessage(pattern='/list'))
-async def list(event):
-    message = event.message
-    id = message.chat_id
-    if id not in data:
-        data[id] = {}
-    user_data = data[id]
-
-    if 'contacts' not in user_data:
-        user_data['contacts'] = []
-    contacts = user_data['contacts']
-    response = 'List is empty'
-    if(len(contacts)):
-        response = 'User list: \n'+'\n'.join([str(x) for x in contacts])
+async def list_users(event):
+    chat_id = event.message.chat_id
+    
+    if chat_id not in data or 'contacts' not in data[chat_id] or not data[chat_id]['contacts']:
+        await event.respond('📭 Список пуст. Добавьте пользователей через /add')
+        return
+    
+    response = "📋 Список отслеживаемых:\n\n"
+    for i, contact in enumerate(data[chat_id]['contacts']):
+        response += f"{i}. {contact.name} - {contact.username or contact.user_id}\n"
+    
     await event.respond(response)
 
-@bot.on(events.NewMessage(pattern='/getall'))
-async def getAll(event):
-    response = ''
-    for key, value in data.items():
-        response += f'{key}:\n'
-        for j, i in value.items():
-            if (isinstance(i, collections.Sequence)):
-                response += f'{j}: ' + '\n'.join([str(x) for x in i]) + '\n'
-            else:
-                response += f'{j}: {i}\n'
-        response += '\n'
+@bot.on(events.NewMessage(pattern='/remove'))
+async def remove_user(event):
+    parts = event.message.message.split()
+    
+    if len(parts) < 2:
+        await event.respond('❌ Использование: /remove 1 (номер из /list)')
+        return
+    
+    try:
+        index = int(parts[1])
+        chat_id = event.message.chat_id
+        
+        if chat_id not in data or 'contacts' not in data[chat_id]:
+            await event.respond('❌ Список пуст')
+            return
+        
+        if 0 <= index < len(data[chat_id]['contacts']):
+            removed = data[chat_id]['contacts'].pop(index)
+            await event.respond(f'✅ Удален: {removed.name}')
+        else:
+            await event.respond('❌ Неверный номер')
+    except ValueError:
+        await event.respond('❌ Введите число')
+
+@bot.on(events.NewMessage(pattern='/clear'))
+async def clear_users(event):
+    chat_id = event.message.chat_id
+    if chat_id in data:
+        data[chat_id]['contacts'] = []
+    await event.respond('🗑️ Список очищен')
+
+@bot.on(events.NewMessage(pattern='/setdelay'))
+async def set_delay(event):
+    parts = event.message.message.split()
+    
+    if len(parts) < 2:
+        await event.respond('❌ Использование: /setdelay 30 (секунд)')
+        return
+    
+    try:
+        delay = int(parts[1])
+        if delay < 5:
+            await event.respond('⚠️ Минимальная задержка 5 секунд')
+            return
+        
+        chat_id = event.message.chat_id
+        if chat_id not in data:
+            data[chat_id] = {'contacts': [], 'is_running': False, 'delay': delay}
+        else:
+            data[chat_id]['delay'] = delay
+        
+        await event.respond(f'⏱️ Задержка установлена: {delay} сек')
+    except ValueError:
+        await event.respond('❌ Введите число секунд')
+
+@bot.on(events.NewMessage(pattern='/status'))
+async def check_status(event):
+    chat_id = event.message.chat_id
+    
+    if chat_id not in data or 'contacts' not in data[chat_id]:
+        await event.respond('📭 Нет отслеживаемых пользователей')
+        return
+    
+    temp_client = TelegramClient(f'status_{chat_id}', API_ID, API_HASH)
+    await temp_client.start(bot_token=BOT_TOKEN)
+    
+    response = "📊 ТЕКУЩИЙ СТАТУС:\n\n"
+    
+    for contact in data[chat_id]['contacts']:
+        try:
+            entity = await temp_client.get_entity(contact.user_id)
+            status_text = get_status_text(entity.status)
+            response += f"👤 {contact.name}\n   {status_text}\n\n"
+        except Exception as e:
+            response += f"❌ {contact.name}: Ошибка доступа\n"
+    
+    await temp_client.disconnect()
     await event.respond(response)
 
-def main():
-    """Start the bot."""
-    bot.run_until_disconnected()
+@bot.on(events.NewMessage(pattern='/start_monitor'))
+async def start_monitor(event):
+    chat_id = event.message.chat_id
+    
+    if chat_id not in data:
+        data[chat_id] = {'contacts': [], 'is_running': False, 'delay': 30}
+    
+    if not data[chat_id].get('contacts'):
+        await event.respond('❌ Сначала добавьте пользователей через /add')
+        return
+    
+    if data[chat_id].get('is_running'):
+        await event.respond('⚠️ Мониторинг уже запущен')
+        return
+    
+    data[chat_id]['is_running'] = True
+    delay = data[chat_id].get('delay', 30)
+    
+    await event.respond(f'🟢 МОНИТОРИНГ ЗАПУЩЕН\n📊 Проверка каждые {delay} сек\n/users - показать список')
+    
+    asyncio.create_task(monitor_loop(chat_id))
 
+async def monitor_loop(chat_id):
+    temp_client = TelegramClient(f'monitor_{chat_id}', API_ID, API_HASH)
+    await temp_client.start(bot_token=BOT_TOKEN)
+    
+    while data.get(chat_id, {}).get('is_running', False):
+        try:
+            for contact in data[chat_id]['contacts']:
+                try:
+                    entity = await temp_client.get_entity(contact.user_id)
+                    current_status = type(entity.status).__name__
+                    
+                    # Проверяем изменение статуса
+                    if contact.last_status != current_status:
+                        # Статус изменился!
+                        contact.last_status = current_status
+                        contact.last_change = datetime.now()
+                        
+                        if isinstance(entity.status, UserStatusOnline):
+                            msg = f"🟢 {contact.name} ВОШЕЛ В СЕТЬ!"
+                            if contact.last_change:
+                                msg += f"\n⏰ {contact.last_change.strftime('%H:%M:%S')}"
+                            await bot.send_message(chat_id, msg)
+                            
+                        elif isinstance(entity.status, UserStatusOffline):
+                            msg = f"⚫ {contact.name} ВЫШЕЛ ИЗ СЕТИ"
+                            if entity.status.was_online:
+                                diff = datetime.now().astimezone() - entity.status.was_online
+                                msg += f"\n⏰ Был(а) онлайн: {format_time_diff(diff)}"
+                            await bot.send_message(chat_id, msg)
+                            
+                        elif isinstance(entity.status, UserStatusRecently):
+                            if contact.online:
+                                await bot.send_message(chat_id, f"⚠️ {contact.name}: статус изменился на 'недавно'")
+                        
+                        contact.online = isinstance(entity.status, UserStatusOnline)
+                    
+                except Exception as e:
+                    print(f"Ошибка проверки {contact.name}: {e}")
+            
+            delay = data.get(chat_id, {}).get('delay', 30)
+            await asyncio.sleep(delay)
+            
+        except Exception as e:
+            print(f"Ошибка в цикле мониторинга: {e}")
+            await asyncio.sleep(10)
+    
+    await temp_client.disconnect()
 
-def utc2localtime(utc):
-    pivot = mktime(utc.timetuple())
-    offset = datetime.fromtimestamp(pivot) - datetime.utcfromtimestamp(pivot)
-    return utc + offset
+@bot.on(events.NewMessage(pattern='/stop_monitor'))
+async def stop_monitor(event):
+    chat_id = event.message.chat_id
+    
+    if chat_id in data:
+        data[chat_id]['is_running'] = False
+    
+    await event.respond('🔴 МОНИТОРИНГ ОСТАНОВЛЕН')
 
-def printToFile(str):
-    file_name = 'spy_log.txt'
-    with open(file_name,'a') as f:
-        print(str)
-        f.write(str + '\n')
+@bot.on(events.NewMessage(pattern='/logs'))
+async def show_logs(event):
+    try:
+        with open('spy_log.txt', 'r') as f:
+            content = f.read()
+            if len(content) > 4000:
+                content = content[-4000:] + "\n... (обрезано)"
+            await event.respond(f'📄 ЛОГИ:\n\n{content}')
+    except:
+        await event.respond('📭 Логи пусты')
 
-def get_interval(diff):
-    total_seconds = int(diff.total_seconds())
-    hours = total_seconds // 3600
-    minutes = (total_seconds % 3600) // 60
-    seconds = total_seconds % 60
-    return f'{hours}h:{minutes}m:{seconds}s'
+@bot.on(events.NewMessage(pattern='/clearlogs'))
+async def clear_logs(event):
+    open('spy_log.txt', 'w').close()
+    await event.respond('🗑️ Логи очищены')
 
-if __name__ == '__main__':
-    main()
+@bot.on(events.NewMessage(pattern='/users'))
+async def show_users(event):
+    chat_id = event.message.chat_id
+    
+    if chat_id not in data or 'contacts' not in data[chat_id]:
+        await event.respond('📭 Нет пользователей')
+        return
+    
+    response = "👥 ОТСЛЕЖИВАЕМЫЕ ПОЛЬЗОВАТЕЛИ:\n\n"
+    for contact in data[chat_id]['contacts']:
+        status = "🟢" if contact.online else "⚫"
+        response += f"{status} {contact.name}\n"
+    
+    await event.respond(response)
+
+def printToFile(msg):
+    with open('spy_log.txt', 'a') as f:
+        timestamp = datetime.now().strftime(DATETIME_FORMAT)
+        log_msg = f'[{timestamp}] {msg}'
+        print(log_msg)
+        f.write(log_msg + '\n')
+
+@bot.on(events.NewMessage())
+async def log_all(event):
+    chat_id = event.message.chat_id
+    text = event.message.message
+    printToFile(f'[{chat_id}]: {text}')
+
+print('🚀 Бот готов к работе!')
+print('Команды: /start_monitor - запуск, /stop_monitor - остановка, /add - добавить')
+
+bot.run_until_disconnected()

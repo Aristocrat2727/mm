@@ -11,15 +11,12 @@ import os
 DATETIME_FORMAT = '%Y-%m-%d %H:%M:%S'
 
 # Берем переменные из окружения Railway
-API_HASH = os.environ.get('API_HASH', 'your api hash')
-API_ID = int(os.environ.get('API_ID', 'your api id'))
-BOT_TOKEN = os.environ.get('BOT_TOKEN', "your bot token")
-USER_NAME = os.environ.get('USER_NAME', "your user name")
+API_HASH = os.environ.get('API_HASH')
+API_ID = int(os.environ.get('API_ID'))
+BOT_TOKEN = os.environ.get('BOT_TOKEN')
 
-client = TelegramClient('data_thief', API_ID, API_HASH)
-
-client.connect()
-client.start()
+# ВАЖНО: для бота используем start(bot_token=...)
+# Не нужно вызывать client.connect() и client.start() отдельно
 bot = TelegramClient('bot', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 
 data = {}
@@ -39,7 +36,7 @@ help_messages = ['/start - start online monitoring ',
          '/getall - status']
 
 
-print('running')
+print('Bot started!')
 
 class Contact:
     online = None
@@ -56,7 +53,6 @@ class Contact:
 
 @bot.on(events.NewMessage(pattern='^/logs$'))
 async def logs(event):
-    """Send a message when the command /start is issued."""
     try:
         with open('spy_log.txt', 'r') as file:
             str = file.read()
@@ -66,13 +62,11 @@ async def logs(event):
 
 @bot.on(events.NewMessage(pattern='/clearlogs$'))
 async def clearLogs(event):
-    """Send a message when the command /start is issued."""
     open('spy_log.txt', 'w').close()
     await event.respond('logs has been deleted')
 
 @bot.on(events.NewMessage(pattern='^/clear$'))
 async def clear(event):
-    """Send a message when the command /start is issued."""
     message = event.message
     id = message.chat_id
     data[id] = {}
@@ -84,7 +78,6 @@ async def help(event):
 
 @bot.on(events.NewMessage())
 async def log(event):
-    """Send a message when the command /start is issued."""
     message = event.message
     id = message.chat_id
     str = f'{datetime.now().strftime(DATETIME_FORMAT)}: [{id}]: {message.message}'
@@ -92,7 +85,6 @@ async def log(event):
 
 @bot.on(events.NewMessage(pattern='^/stop$'))
 async def stop(event):
-    """Send a message when the command /start is issued."""
     message = event.message
     id = message.chat_id
     if id not in data:
@@ -136,46 +128,54 @@ async def start(event):
             break;
         print(f'running {id}: {counter}')
         counter+=1
+        
+        # Создаем клиент для каждого пользователя отдельно
+        client = TelegramClient(f'session_{id}', API_ID, API_HASH)
+        await client.start()
+        
         for contact in contacts:
             print(contact)
-            account = await client.get_entity(contact.id)
+            try:
+                account = await client.get_entity(contact.id)
 
-            if isinstance(account.status, UserStatusOnline):
-                if contact.online != True:
-                    contact.online = True
-                    contact.last_offline = datetime.now()
-                    was_offline='unknown offline time'
-                    if contact.last_online is not None:
-                        diff = contact.last_offline - contact.last_online
-                        was_offline = get_interval(diff)
-                    await event.respond(f'{was_offline}: {contact.name} went online.')
-            elif isinstance(account.status, UserStatusOffline):
-                if contact.online == True:
-                    contact.online = False
-                    last_time_online = utc2localtime(account.status.was_online)
-                    if (last_time_online is None):
-                        last_time_online = datetime.now()
-                    contact.last_online = account.status.was_online
+                if isinstance(account.status, UserStatusOnline):
+                    if contact.online != True:
+                        contact.online = True
+                        contact.last_offline = datetime.now()
+                        was_offline='unknown offline time'
+                        if contact.last_online is not None:
+                            diff = contact.last_offline - contact.last_online
+                            was_offline = get_interval(diff)
+                        await event.respond(f'{was_offline}: {contact.name} went online.')
+                elif isinstance(account.status, UserStatusOffline):
+                    if contact.online == True:
+                        contact.online = False
+                        contact.last_online = account.status.was_online
 
-                    was_online='unknown online time'
-                    if contact.last_offline is not None:
-                        diff = contact.last_online - contact.last_offline
-                        was_online = get_interval(diff)
+                        was_online='unknown online time'
+                        if contact.last_offline is not None:
+                            diff = contact.last_online - contact.last_offline
+                            was_online = get_interval(diff)
 
-                    await event.respond(f'{was_online} {contact.name} went offline.')
-                contact.last_offline = None
-            else:
-                if contact.online == True:
-                    contact.online = False
-                    contact.last_online = datetime.now()
-
-                    was_online='unknown online time'
-                    if contact.last_offline is not None:
-                        diff = contact.last_online - contact.last_offline
-                        was_online = get_interval(diff)
-
-                    await event.respond(f'{was_online}: {contact.name} went offline.')
+                        await event.respond(f'{was_online} {contact.name} went offline.')
                     contact.last_offline = None
+                else:
+                    if contact.online == True:
+                        contact.online = False
+                        contact.last_online = datetime.now()
+
+                        was_online='unknown online time'
+                        if contact.last_offline is not None:
+                            diff = contact.last_online - contact.last_offline
+                            was_online = get_interval(diff)
+
+                        await event.respond(f'{was_online}: {contact.name} went offline.')
+                        contact.last_offline = None
+            except Exception as e:
+                print(f"Error checking {contact.name}: {e}")
+        
+        await client.disconnect()
+        
         delay = 5
         if('delay' in user_data):
             delay = user_data['delay']
@@ -293,7 +293,6 @@ def printToFile(str):
         f.write(str + '\n')
 
 def get_interval(diff):
-    # diff - это timedelta объект
     total_seconds = int(diff.total_seconds())
     hours = total_seconds // 3600
     minutes = (total_seconds % 3600) // 60
